@@ -28,6 +28,7 @@
    IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
+#include <sys/stat.h>
 #include <android-base/strings.h>
 
 #define _REALLY_INCLUDE_SYS__SYSTEM_PROPERTIES_H_
@@ -52,8 +53,15 @@ std::vector<std::string> ro_product_props_default_source_order = {
 void set_rild_libpath(char const variant[])
 {
     std::string libpath("/system/vendor/lib/libsec-ril.");
-    libpath += variant;
-    libpath += ".so";
+    if (variant != nullptr && strlen(variant) > 0) {
+        libpath += variant;
+        libpath += ".so";
+    }
+
+    struct stat st;
+    if (variant == nullptr || strlen(variant) == 0 || stat(libpath.c_str(), &st) != 0) {
+        libpath = "/system/vendor/lib/libsec-ril.so";
+    }
 
     property_override("rild.libpath", libpath.c_str());
 }

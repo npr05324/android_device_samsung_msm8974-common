@@ -297,5 +297,15 @@ $(shell mkdir -p $(TARGET_OUT)/etc/firmware/wcd9320; \
 	ln -sf /data/misc/audio/wcd9320_mad_audio.bin \
 		$(TARGET_OUT)/etc/firmware/wcd9320/wcd9320_mad_audio.bin)
 
+# Create symlink for legacy adbd path
+ADBD_SYMLINK := $(TARGET_OUT_EXECUTABLES)/adbd
+$(ADBD_SYMLINK): $(LOCAL_INSTALLED_MODULE)
+	@echo "adbd symlink: $@"
+	@mkdir -p $(dir $@)
+	@rm -rf $@
+	$(hide) ln -sf /apex/com.android.adbd/bin/adbd $@
+
+ALL_DEFAULT_INSTALLED_MODULES += $(ADBD_SYMLINK)
+
 endif
 endif
