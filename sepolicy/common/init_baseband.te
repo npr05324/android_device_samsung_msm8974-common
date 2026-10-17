@@ -1,0 +1,11 @@
+type init_baseband, domain;
+type init_baseband_exec, exec_type, vendor_file_type, file_type;
+
+init_daemon_domain(init_baseband)
+
+allow init_baseband vendor_shell_exec:file rx_file_perms;
+allow init_baseband vendor_toolbox_exec:file rx_file_perms;
+
+r_dir_file(init_baseband, firmware_file)
+
+set_prop(init_baseband, vendor_baseband_prop)

@@ -1,3 +1,8 @@
+hal_server_domain(rild, hal_telephony)
+
+allow rild hal_telephony_hwservice:hwservice_manager { add find };
+allow rild hidl_base_hwservice:hwservice_manager add;
+
 set_prop(rild, net_radio_prop)
 set_prop(rild, radio_prop)
 
@@ -10,3 +15,7 @@ allow rild radio_data_file:lnk_file read;
 allow rild proc_net:file w_file_perms;
 allow rild proc_qtaguid_stat:file r_file_perms;
 allow rild sysfs_sec_key:file rw_file_perms;
+
+allow rild self:capability { setuid setgid net_admin net_raw };
+
+get_prop(rild, vendor_baseband_prop)

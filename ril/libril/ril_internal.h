@@ -93,6 +93,12 @@ void releaseWakeLock();
 
 void onNewCommandConnect(RIL_SOCKET_ID socket_id);
 
+/* Samsung: true while IMS is registered with the VoLTE feature */
+bool isVolteRegistered();
+
+/* Samsung: true while IMS is registered with the SMS over IMS feature */
+bool isImsSmsRegistered();
+
 }   // namespace android
 
 #endif //ANDROID_RIL_INTERNAL_H

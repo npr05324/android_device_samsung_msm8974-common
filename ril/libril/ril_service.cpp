@@ -34,6 +34,7 @@
 #include <utils/SystemClock.h>
 #include <inttypes.h>
 #include <cutils/properties.h>
+#include <atomic>
 
 #define ANDROID_ATOMIC_INLINE
 extern "C" {
@@ -64,11 +65,29 @@ using android::sp;
 #if defined(ANDROID_MULTI_SIM)
 #define CALL_ONREQUEST(a, b, c, d, e) \
         s_vendorFunctions->onRequest((a), (b), (c), (d), ((RIL_SOCKET_ID)(e)))
-#define CALL_ONSTATEREQUEST(a) s_vendorFunctions->onStateRequest((RIL_SOCKET_ID)(a))
+#define CALL_ONSTATEREQUEST_RAW(a) s_vendorFunctions->onStateRequest((RIL_SOCKET_ID)(a))
 #else
 #define CALL_ONREQUEST(a, b, c, d, e) s_vendorFunctions->onRequest((a), (b), (c), (d))
-#define CALL_ONSTATEREQUEST(a) s_vendorFunctions->onStateRequest()
+#define CALL_ONSTATEREQUEST_RAW(a) s_vendorFunctions->onStateRequest()
 #endif
+
+/*
+ * libsec-ril still reports the pre-RIL v7 radio states (RADIO_STATE_SIM_NOT_READY,
+ * RADIO_STATE_SIM_READY, ...), which all mean "radio on" but are not valid
+ * RadioState values for the HAL. It reports RADIO_STATE_UNAVAILABLE until its
+ * proxy is initialized, so keep that as is.
+ */
+static RadioState toHalRadioState(int state) {
+    switch (state) {
+        case 0: // RADIO_STATE_OFF
+            return RadioState::OFF;
+        case 1: // RADIO_STATE_UNAVAILABLE
+            return RadioState::UNAVAILABLE;
+        default: // RADIO_STATE_SIM_* / RUIM_* / NV_* and RADIO_STATE_ON
+            return RadioState::ON;
+    }
+}
+#define CALL_ONSTATEREQUEST(a) toHalRadioState(CALL_ONSTATEREQUEST_RAW(a))
 
 #ifdef OEM_HOOK_DISABLED
 constexpr bool kOemHookEnabled = false;
@@ -940,6 +959,11 @@ Return<void> RadioImpl::dial(int32_t serial, const Dial& dialInfo) {
     }
     RIL_Dial dial = {};
     RIL_UUS_Info uusInfo = {};
+    // libsec-ril dials over IMS only when asked to, as Samsung's telephony
+    // framework did while VoLTE was registered
+    RIL_CallDetails callDetails = {};
+    callDetails.callDomain = android::isVolteRegistered() ? RIL_CALL_DOMAIN_PS : RIL_CALL_DOMAIN_CS;
+    dial.callDetails = &callDetails;
     int32_t sizeOfDial = sizeof(dial);
 
     if (!copyHidlStringToRil(&dial.address, dialInfo.address, pRI)) {
@@ -1476,6 +1500,24 @@ Return<void> RadioImpl::getBasebandVersion(int32_t serial) {
 #if VDBG
     RLOGD("getBasebandVersion: serial %d", serial);
 #endif
+    /*
+     * After answering BASEBAND_VERSION, libsec-ril runs InitMiscInformation() and
+     * pushes factory IPCs (warranty bit, key string block) to the modem, which
+     * crashes an already running modem firmware. Answer from the version
+     * /vendor/bin/init.baseband.sh read out of the modem image instead.
+     */
+    if (property_get_bool("ro.vendor.ril.cache_baseband_version", false)) {
+        char version[PROPERTY_VALUE_MAX] = {0};
+        property_get("persist.vendor.sec.baseband_version", version, "");
+        if (version[0] != '\0') {
+            radio::getBasebandVersionResponse(mSlotId, RESPONSE_SOLICITED, serial,
+                    RIL_E_SUCCESS, version, strlen(version) + 1);
+        } else {
+            radio::getBasebandVersionResponse(mSlotId, RESPONSE_SOLICITED, serial,
+                    RIL_E_GENERIC_FAILURE, NULL, 0);
+        }
+        return Void();
+    }
     dispatchVoid(serial, mSlotId, RIL_REQUEST_BASEBAND_VERSION);
     return Void();
 }
@@ -1653,6 +1695,18 @@ Return<void> RadioImpl::setCdmaSubscriptionSource(int32_t serial, CdmaSubscripti
 #if VDBG
     RLOGD("setCdmaSubscriptionSource: serial %d", serial);
 #endif
+    /*
+     * RILJ sends this on every RIL_CONNECTED and libsec-ril turns it into
+     * QMI_NAS_SET_RTRE_CONFIG. GSM/LTE-only devices have no use for it.
+     */
+    if (property_get_bool("ro.vendor.ril.ignore_cdma_subscription_source", false)) {
+        RequestInfo *pRI = android::addRequestToList(serial, mSlotId,
+                RIL_REQUEST_CDMA_SET_SUBSCRIPTION_SOURCE);
+        if (pRI != NULL) {
+            sendErrorResponse(pRI, RIL_E_SUCCESS);
+        }
+        return Void();
+    }
     dispatchInts(serial, mSlotId, RIL_REQUEST_CDMA_SET_SUBSCRIPTION_SOURCE, 1, cdmaSub);
     return Void();
 }
@@ -3475,9 +3529,14 @@ int radio::getLastCallFailCauseResponse(int slotId,
             RIL_LastCallFailCauseInfo *pFailCauseInfo = (RIL_LastCallFailCauseInfo *) response;
             info.causeCode = (LastCallFailCause) pFailCauseInfo->cause_code;
             info.vendorCause = convertCharPtrToHidlString(pFailCauseInfo->vendor_cause);
-        } else if (responseLen % sizeof(int) != 0) {
+        } else if (responseLen % sizeof(int) == 0) {
             int *pInt = (int *) response;
             info.causeCode = (LastCallFailCause) pInt[0];
+            // libsec-ril has no cause for calls released over IMS; report them as the
+            // normal clearing telephony assumed while this response failed to parse
+            if (info.causeCode == LastCallFailCause::ERROR_UNSPECIFIED) {
+                info.causeCode = LastCallFailCause::NORMAL;
+            }
         } else {
             RLOGE("getCurrentCallsResponse Invalid response: NULL");
             if (e == RIL_E_SUCCESS) responseInfo.error = RadioError::INVALID_RESPONSE;
@@ -6009,7 +6068,10 @@ int radio::getImsRegistrationStateResponse(int slotId,
             if (e == RIL_E_SUCCESS) responseInfo.error = RadioError::INVALID_RESPONSE;
         } else {
             int *pInt = (int *) response;
-            isRegistered = pInt[0] == 1 ? true : false;
+            // libsec-ril reports the voice registration here, but telephony reads it
+            // as "send SMS over IMS", which the Samsung IMS stack only supports when
+            // its SMS feature is registered (not on SKT)
+            isRegistered = pInt[0] == 1 && android::isImsSmsRegistered();
             ratFamily = pInt[1];
         }
         Return<void> retStatus
@@ -6830,8 +6892,11 @@ int radio::sendRequestRawResponse(int slotId,
         hidl_vec<uint8_t> data;
 
         if (response == NULL) {
-            RLOGE("sendRequestRawResponse: Invalid response");
-            if (e == RIL_E_SUCCESS) responseInfo.error = RadioError::INVALID_RESPONSE;
+            // Samsung OEM requests that only report an event succeed without data
+            if (responseLen != 0) {
+                RLOGE("sendRequestRawResponse: Invalid response");
+                if (e == RIL_E_SUCCESS) responseInfo.error = RadioError::INVALID_RESPONSE;
+            }
         } else {
             data.setToExternal((uint8_t *) response, responseLen);
         }
@@ -6894,6 +6959,69 @@ RadioIndicationType convertIntToRadioIndicationType(int indicationType) {
             (RadioIndicationType::UNSOLICITED_ACK_EXP);
 }
 
+/*
+ * libsec-ril sends RIL_UNSOL_RESPONSE_RADIO_STATE_CHANGED when its proxy finishes
+ * initializing, but may still report RADIO_STATE_UNAVAILABLE at that point and
+ * does not notify again. Poll until the state settles so the framework doesn't
+ * keep the radio unavailable forever.
+ */
+#define RADIO_STATE_POLL_INTERVAL_US (500 * 1000)
+#define RADIO_STATE_POLL_MAX 240
+
+static std::atomic<bool> s_radioStatePolling[4];
+
+struct RadioStatePollArgs {
+    int slotId;
+    int indicationType;
+};
+
+static void *radioStatePollThread(void *arg) {
+    RadioStatePollArgs *args = (RadioStatePollArgs *) arg;
+    int slotId = args->slotId;
+    int indicationType = args->indicationType;
+    delete args;
+
+    for (int i = 0; i < RADIO_STATE_POLL_MAX && s_radioStatePolling[slotId].load(); i++) {
+        usleep(RADIO_STATE_POLL_INTERVAL_US);
+        RadioState state = CALL_ONSTATEREQUEST(slotId);
+        if (state == RadioState::UNAVAILABLE) continue;
+
+        pthread_rwlock_t *radioServiceRwlockPtr = radio::getRadioServiceRwlock(slotId);
+        pthread_rwlock_rdlock(radioServiceRwlockPtr);
+        bool notified = false;
+        if (radioService[slotId] != NULL && radioService[slotId]->mRadioIndication != NULL) {
+            RLOGD("radioStatePollThread: radioState %d", state);
+            Return<void> retStatus = radioService[slotId]->mRadioIndication->radioStateChanged(
+                    convertIntToRadioIndicationType(indicationType), state);
+            radioService[slotId]->checkReturnStatus(retStatus);
+            notified = true;
+        }
+        pthread_rwlock_unlock(radioServiceRwlockPtr);
+        if (notified) break;
+    }
+    s_radioStatePolling[slotId].store(false);
+    return NULL;
+}
+
+static void startRadioStatePoll(int slotId, int indicationType) {
+    bool expected = false;
+    if (slotId < 0 || slotId >= 4 ||
+            !s_radioStatePolling[slotId].compare_exchange_strong(expected, true)) {
+        return;
+    }
+    pthread_t tid;
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    RadioStatePollArgs *args = new RadioStatePollArgs{slotId, indicationType};
+    if (pthread_create(&tid, &attr, radioStatePollThread, args) != 0) {
+        RLOGE("startRadioStatePoll: failed to create poll thread");
+        delete args;
+        s_radioStatePolling[slotId].store(false);
+    }
+    pthread_attr_destroy(&attr);
+}
+
 int radio::radioStateChangedInd(int slotId,
                                  int indicationType, int token, RIL_Errno e, void *response,
                                  size_t responseLen) {
@@ -6904,6 +7032,11 @@ int radio::radioStateChangedInd(int slotId,
         Return<void> retStatus = radioService[slotId]->mRadioIndication->radioStateChanged(
                 convertIntToRadioIndicationType(indicationType), radioState);
         radioService[slotId]->checkReturnStatus(retStatus);
+        if (radioState == RadioState::UNAVAILABLE) {
+            startRadioStatePoll(slotId, indicationType);
+        } else if (slotId >= 0 && slotId < 4) {
+            s_radioStatePolling[slotId].store(false);
+        }
     } else {
         RLOGE("radioStateChangedInd: radioService[%d]->mRadioIndication == NULL", slotId);
     }

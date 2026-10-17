@@ -19,6 +19,7 @@
 #define LOG_TAG "RILC"
 
 #include <hardware_legacy/power.h>
+#include <atomic>
 #include <telephony/ril.h>
 #include <telephony/ril_cdma_sms.h>
 #include <cutils/sockets.h>
@@ -727,6 +728,36 @@ wakeTimeoutCallback (void *param) {
     }
 }
 
+/*
+ * Samsung reports the IMS registration as an OEM unsolicited response:
+ * int[] { registered, feature mask (1 = VoLTE), ... }. Samsung's telephony
+ * framework used it to dial over IMS; remember it for RIL_REQUEST_DIAL.
+ */
+#define RIL_UNSOL_SAMSUNG_IMS_REGISTRATION_STATE_CHANGED 11027
+#define SAMSUNG_IMS_FEATURE_VOLTE 1
+#define SAMSUNG_IMS_FEATURE_SMS 2
+
+static std::atomic<bool> s_volteRegistered(false);
+static std::atomic<bool> s_imsSmsRegistered(false);
+
+bool isVolteRegistered() {
+    return s_volteRegistered;
+}
+
+bool isImsSmsRegistered() {
+    return s_imsSmsRegistered;
+}
+
+static void updateImsRegistration(const void *data, size_t datalen) {
+    if (data == NULL || datalen < 2 * sizeof(int)) {
+        return;
+    }
+    const int *state = (const int *) data;
+    s_volteRegistered = state[0] == 1 && (state[1] & SAMSUNG_IMS_FEATURE_VOLTE);
+    s_imsSmsRegistered = state[0] == 1 && (state[1] & SAMSUNG_IMS_FEATURE_SMS);
+    RLOGD("IMS registration %d features %d", state[0], state[1]);
+}
+
 #if defined(ANDROID_MULTI_SIM)
 extern "C"
 void RIL_onUnsolicitedResponse(int unsolResponse, const void *data,
@@ -751,6 +782,10 @@ void RIL_onUnsolicitedResponse(int unsolResponse, const void *data,
         // Ignore RIL_onUnsolicitedResponse before RIL_register
         RLOGW("RIL_onUnsolicitedResponse called before RIL_register");
         return;
+    }
+
+    if (unsolResponse == RIL_UNSOL_SAMSUNG_IMS_REGISTRATION_STATE_CHANGED) {
+        updateImsRegistration(data, datalen);
     }
 
     remapUnsol(&unsolResponse);
