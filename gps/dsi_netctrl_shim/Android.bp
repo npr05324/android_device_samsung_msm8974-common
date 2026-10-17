@@ -1,0 +1,14 @@
+//
+// Copyright (C) 2026 The LineageOS Project
+// SPDX-License-Identifier: Apache-2.0
+//
+
+// libloc_api_v02 links libloc_ds_api, which only uses libdsi_netctrl to bring up
+// data calls for emergency SUPL. That library isn't shipped for this device, so
+// provide the few entry points it needs, all reporting failure.
+cc_library_shared {
+    name: "libdsi_netctrl",
+    srcs: ["dsi_netctrl.c"],
+    vendor: true,
+    cflags: ["-Wall", "-Werror"],
+}
