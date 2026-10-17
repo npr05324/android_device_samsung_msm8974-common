@@ -37,3 +37,10 @@ persist.rild.nitz_short_ons_3=""
 
 # Time
 persist.timed.enable=true
+
+# USB & ADB Configuration
+sys.usb.ffs.aio_compat=1
+persist.sys.usb.ffs.aio_compat=1
+# The 3.4 kernel has no AIO on FunctionFS: the nonblocking adbd transport fails
+# its first read and rebinds the gadget while falling back to legacy mode
+ro.adb.nonblocking_ffs=0
