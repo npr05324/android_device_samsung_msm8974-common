@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+#include "BlobFixups.h"
 #include "SensorEventQueue.h"
 #include "multihal.h"
 
@@ -667,6 +668,7 @@ static void lazy_init_modules() {
                 ALOGW("module == NULL");
             } else {
                 ALOGV("Loaded symbols from \"%s\"", sym);
+                apply_sensor_blob_fixups(lib_handle);
                 sub_hw_modules->push_back(module);
                 so_handles->push_back(lib_handle);
                 lib_handle = nullptr;

@@ -2,6 +2,7 @@ cc_library_static {
     name: "multihal-samsung8974",
     vendor: true,
     srcs: [
+        "BlobFixups.cpp",
         "multihal.cpp",
         "SensorEventQueue.cpp",
     ],
